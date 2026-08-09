@@ -1,0 +1,23 @@
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 数据库 & 备份（含真实数据，切勿上传）
+data/
+backups/
+导出/
+
+# 日志
+*.log
+
+# 临时补丁文件
+patch_*.py
+
+# IDE
+.vscode/
+.idea/
