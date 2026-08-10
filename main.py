@@ -1789,69 +1789,80 @@ class CashierApp(tk.Tk):
     # 销售记录
     # ------------------------------------------------------------------ #
     def _build_sales_tab(self) -> None:
-        top = ttk.Frame(self.tab_sales)
-        top.pack(fill="x", padx=8, pady=(8, 4))
-
-        self.sale_search_var = tk.StringVar()
-        self.sale_search_var.trace_add("write", lambda *_: self._refresh_sales_tab())
-        ttk.Entry(top, textvariable=self.sale_search_var, width=20).pack(side="left", padx=(0, 6))
-        ttk.Label(top, text="日期从:").pack(side="left")
-        self.sale_start_var = tk.StringVar(value="")
-        ttk.Entry(top, textvariable=self.sale_start_var, width=12).pack(side="left", padx=4)
-        ttk.Label(top, text="到:").pack(side="left")
-        self.sale_end_var = tk.StringVar(value="")
-        ttk.Entry(top, textvariable=self.sale_end_var, width=12).pack(side="left", padx=4)
-        ttk.Button(top, text="查询", command=self._refresh_sales_tab, width=6).pack(side="left", padx=(6, 0))
-
+        from tkinter import ttk as _ttk
         body = ttk.Frame(self.tab_sales)
-        body.pack(fill="both", expand=True, padx=8)
-        body.columnconfigure(0, weight=3)  # 左：商品销售历史
-        body.columnconfigure(1, weight=5)  # 右：销售记录
+        body.pack(fill="both", expand=True, padx=6, pady=(6, 6))
 
-        # ===== 左半边：商品销售历史 =====
-        left = ttk.Frame(body)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-        left.rowconfigure(0, weight=2)
-        left.rowconfigure(1, weight=3)
+        # 可拖拽分割面板
+        pane = _ttk.PanedWindow(body, orient="horizontal")
+        pane.pack(fill="both", expand=True)
 
-        prod_box = ttk.LabelFrame(left, text="商品销售汇总（累计）", padding=4)
-        prod_box.grid(row=0, column=0, sticky="nsew", pady=(0, 4))
+        # ===== 左面板：商品选择 + 历史 =====
+        left = ttk.Frame(pane)
+        pane.add(left, weight=3)
+        left.rowconfigure(0, weight=0)
+        left.rowconfigure(1, weight=2)
+        left.rowconfigure(2, weight=3)
+
+        left_bar = ttk.Frame(left)
+        left_bar.grid(row=0, column=0, sticky="ew", pady=(0, 3))
+        self.sale_prod_search_var = tk.StringVar()
+        self.sale_prod_search_var.trace_add("write", lambda *_: self._refresh_sale_prod_list())
+        ttk.Entry(left_bar, textvariable=self.sale_prod_search_var, width=14).pack(side="left", padx=(0, 3))
+        ttk.Button(left_bar, text="刷新", command=self._refresh_sale_prod_list, width=5).pack(side="left")
+
+        prod_box = ttk.LabelFrame(left, text="全部商品", padding=4)
+        prod_box.grid(row=1, column=0, sticky="nsew", pady=(0, 3))
         self.sale_prod_tree = self._build_tree(
-            prod_box, (("name", "商品", 100, "w"), ("total_qty", "累计销量", 55, "e"),
-                       ("total_revenue", "累计销售额", 75, "e")), height=8)
+            prod_box, (("name", "商品", 85, "w"), ("category", "类别", 40, "center"),
+                       ("stock", "库存", 32, "e"),
+                       ("total_qty", "销量", 38, "e"), ("total_revenue", "销售额", 55, "e")), height=7)
         self.sale_prod_tree.pack(fill="both", expand=True)
         self.sale_prod_tree.bind("<<TreeviewSelect>>", self._on_sale_prod_select)
 
-        prod_detail_box = ttk.LabelFrame(left, text="商品销售明细", padding=4)
-        prod_detail_box.grid(row=1, column=0, sticky="nsew")
+        prod_detail_box = ttk.LabelFrame(left, text="销售历史", padding=4)
+        prod_detail_box.grid(row=2, column=0, sticky="nsew")
         self.sale_prod_detail_tree = self._build_tree(
-            prod_detail_box, (("date", "日期", 90, "center"), ("order_no", "单号", 70, "center"),
-                              ("qty", "数量", 40, "e"), ("subtotal", "小计", 60, "e")), height=6)
+            prod_detail_box, (("date", "日期", 80, "center"), ("order_no", "单号", 60, "center"),
+                              ("qty", "数量", 32, "e"), ("subtotal", "小计", 50, "e")), height=5)
         self.sale_prod_detail_tree.pack(fill="both", expand=True)
 
-        # ===== 右半边：原有销售记录 =====
-        right = ttk.Frame(body)
-        right.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+        # ===== 右面板：销售记录 =====
+        right = ttk.Frame(pane)
+        pane.add(right, weight=5)
+
+        right_bar = ttk.Frame(right)
+        right_bar.pack(fill="x", pady=(0, 3))
+        self.sale_search_var = tk.StringVar()
+        self.sale_search_var.trace_add("write", lambda *_: self._refresh_sales_tab())
+        ttk.Entry(right_bar, textvariable=self.sale_search_var, width=14).pack(side="left", padx=(0, 4))
+        ttk.Label(right_bar, text="从:").pack(side="left")
+        self.sale_start_var = tk.StringVar(value="")
+        ttk.Entry(right_bar, textvariable=self.sale_start_var, width=9).pack(side="left", padx=2)
+        ttk.Label(right_bar, text="到:").pack(side="left")
+        self.sale_end_var = tk.StringVar(value="")
+        ttk.Entry(right_bar, textvariable=self.sale_end_var, width=9).pack(side="left", padx=2)
+        ttk.Button(right_bar, text="查询", command=self._refresh_sales_tab, width=5).pack(side="left", padx=(4, 0))
 
         self.sale_tree = self._build_tree(
-            right, (("order_no", "单号", 90, "center"), ("status", "状态", 45, "center"),
-                   ("total", "总金额", 60, "e"),
-                   ("discount", "优惠", 50, "e"), ("paid", "实收", 55, "e"),
-                   ("change", "找零", 50, "e"), ("member", "会员", 65, "center"),
-                   ("items", "商品数", 45, "center"), ("time", "时间", 110, "center")),
+            right, (("order_no", "单号", 75, "center"), ("status", "状态", 38, "center"),
+                   ("total", "总金额", 52, "e"),
+                   ("discount", "优惠", 45, "e"), ("paid", "实收", 48, "e"),
+                   ("change", "找零", 45, "e"), ("member", "会员", 55, "center"),
+                   ("items", "数量", 38, "center"), ("time", "时间", 100, "center")),
             height=8)
         self.sale_tree.pack(fill="x")
         self._make_sortable(self.sale_tree, {"order_no", "total", "discount", "paid", "change", "items"},
                             self._refresh_sales_tab)
         self.sale_tree.bind("<<TreeviewSelect>>", self._on_sale_select)
 
-        detail = ttk.LabelFrame(right, text="销售明细", padding=6)
-        detail.pack(fill="both", expand=True, pady=(4, 0))
+        detail = ttk.LabelFrame(right, text="销售明细", padding=4)
+        detail.pack(fill="both", expand=True, pady=(3, 0))
         self.sale_item_tree = self._build_tree(
-            detail, (("pid", "商品ID", 55, "center"), ("name", "商品", 160, "w"),
-                     ("price", "单价", 55, "e"), ("qty", "数量", 45, "center"),
-                     ("subtotal", "小计", 70, "e")),
-            height=6)
+            detail, (("pid", "商品ID", 50, "center"), ("name", "商品", 130, "w"),
+                     ("price", "单价", 50, "e"), ("qty", "数量", 40, "center"),
+                     ("subtotal", "小计", 60, "e")),
+            height=5)
         self.sale_item_tree.pack(fill="both", expand=True)
         sbtn = ttk.Frame(detail)
         sbtn.pack(fill="x", pady=(4, 0))
@@ -1878,14 +1889,21 @@ class CashierApp(tk.Tk):
         self._fill_tree(self.sale_tree, rows)
         self.sale_tree.tag_configure("returned", foreground="gray")
 
-        # 左半边：商品销售汇总
+    def _refresh_sale_prod_list(self) -> None:
+        """左半边：加载全部商品列表（合并销量数据）。"""
         try:
-            prods = self.db.get_product_sales_summary()
+            keyword = self.sale_prod_search_var.get().strip()
+            products = self.db.search_products(keyword)
+            sales_map = {s["product_id"]: s for s in self.db.get_product_sales_summary()}
         except Exception:
-            logger.exception("商品销售汇总查询失败")
+            logger.exception("商品列表加载失败")
             return
-        prod_rows = [((p["name"], p["total_qty"], f"{p['total_revenue']:.2f}"),
-                      str(p["product_id"]), ()) for p in prods]
+        prod_rows = []
+        for p in products:
+            s = sales_map.get(p["id"], {})
+            prod_rows.append(((p["name"], p.get("category", ""), p["stock"],
+                               s.get("total_qty", 0), f"{s.get('total_revenue', 0):.2f}"),
+                              str(p["id"]), ()))
         self._fill_tree(self.sale_prod_tree, prod_rows)
 
     def _on_sale_prod_select(self, _event=None):
@@ -2992,6 +3010,7 @@ class CashierApp(tk.Tk):
             self._refresh_stock_tab()
         elif idx == 4:
             self._refresh_sales_tab()
+            self._refresh_sale_prod_list()
         elif idx == 6:
             self._refresh_finance_tab()
 
