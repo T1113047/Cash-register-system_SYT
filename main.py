@@ -1805,20 +1805,47 @@ class CashierApp(tk.Tk):
 
         body = ttk.Frame(self.tab_sales)
         body.pack(fill="both", expand=True, padx=8)
+        body.columnconfigure(0, weight=3)  # 左：商品销售历史
+        body.columnconfigure(1, weight=5)  # 右：销售记录
+
+        # ===== 左半边：商品销售历史 =====
+        left = ttk.Frame(body)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        left.rowconfigure(0, weight=2)
+        left.rowconfigure(1, weight=3)
+
+        prod_box = ttk.LabelFrame(left, text="商品销售汇总（累计）", padding=4)
+        prod_box.grid(row=0, column=0, sticky="nsew", pady=(0, 4))
+        self.sale_prod_tree = self._build_tree(
+            prod_box, (("name", "商品", 100, "w"), ("total_qty", "累计销量", 55, "e"),
+                       ("total_revenue", "累计销售额", 75, "e")), height=8)
+        self.sale_prod_tree.pack(fill="both", expand=True)
+        self.sale_prod_tree.bind("<<TreeviewSelect>>", self._on_sale_prod_select)
+
+        prod_detail_box = ttk.LabelFrame(left, text="商品销售明细", padding=4)
+        prod_detail_box.grid(row=1, column=0, sticky="nsew")
+        self.sale_prod_detail_tree = self._build_tree(
+            prod_detail_box, (("date", "日期", 90, "center"), ("order_no", "单号", 70, "center"),
+                              ("qty", "数量", 40, "e"), ("subtotal", "小计", 60, "e")), height=6)
+        self.sale_prod_detail_tree.pack(fill="both", expand=True)
+
+        # ===== 右半边：原有销售记录 =====
+        right = ttk.Frame(body)
+        right.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
 
         self.sale_tree = self._build_tree(
-            body, (("order_no", "单号", 100, "center"), ("status", "状态", 55, "center"),
-                   ("total", "总金额", 70, "e"),
-                   ("discount", "优惠", 55, "e"), ("paid", "实收", 65, "e"),
-                   ("change", "找零", 55, "e"), ("member", "会员", 80, "center"),
-                   ("items", "商品数", 50, "center"), ("time", "时间", 130, "center")),
+            right, (("order_no", "单号", 90, "center"), ("status", "状态", 45, "center"),
+                   ("total", "总金额", 60, "e"),
+                   ("discount", "优惠", 50, "e"), ("paid", "实收", 55, "e"),
+                   ("change", "找零", 50, "e"), ("member", "会员", 65, "center"),
+                   ("items", "商品数", 45, "center"), ("time", "时间", 110, "center")),
             height=8)
         self.sale_tree.pack(fill="x")
         self._make_sortable(self.sale_tree, {"order_no", "total", "discount", "paid", "change", "items"},
                             self._refresh_sales_tab)
         self.sale_tree.bind("<<TreeviewSelect>>", self._on_sale_select)
 
-        detail = ttk.LabelFrame(body, text="销售明细", padding=6)
+        detail = ttk.LabelFrame(right, text="销售明细", padding=6)
         detail.pack(fill="both", expand=True, pady=(4, 0))
         self.sale_item_tree = self._build_tree(
             detail, (("pid", "商品ID", 55, "center"), ("name", "商品", 160, "w"),
@@ -1850,6 +1877,31 @@ class CashierApp(tk.Tk):
                          str(s["id"]), tag))
         self._fill_tree(self.sale_tree, rows)
         self.sale_tree.tag_configure("returned", foreground="gray")
+
+        # 左半边：商品销售汇总
+        try:
+            prods = self.db.get_product_sales_summary()
+        except Exception:
+            logger.exception("商品销售汇总查询失败")
+            return
+        prod_rows = [((p["name"], p["total_qty"], f"{p['total_revenue']:.2f}"),
+                      str(p["product_id"]), ()) for p in prods]
+        self._fill_tree(self.sale_prod_tree, prod_rows)
+
+    def _on_sale_prod_select(self, _event=None):
+        """左半边商品树选中时，显示该商品所有销售明细。"""
+        sel = self.sale_prod_tree.selection()
+        if not sel:
+            return
+        try:
+            details = self.db.get_product_sale_details(int(sel[0]))
+        except Exception:
+            logger.exception("商品销售明细查询失败")
+            return
+        rows = [((d["created_at"][:10], d["order_no"] or str(d["sale_id"]),
+                  d["quantity"], f"{d['subtotal']:.2f}"),
+                 str(d["sale_id"]), ()) for d in details]
+        self._fill_tree(self.sale_prod_detail_tree, rows)
 
     def _on_sale_select(self, _event=None):
         sel = self.sale_tree.selection()
@@ -2056,7 +2108,7 @@ class CashierApp(tk.Tk):
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=3)
         body.columnconfigure(1, weight=2)
-        body.rowconfigure(0, weight=2)
+        body.rowconfigure(0, weight=3)
         body.rowconfigure(1, weight=2)
         body.rowconfigure(2, weight=1)
 
@@ -2065,7 +2117,7 @@ class CashierApp(tk.Tk):
         self.fin_daily_tree = self._build_tree(
             daily_box, (("date", "日期", 80, "center"), ("revenue", "营收", 85, "e"),
                         ("cost", "成本", 70, "e"), ("profit", "毛利", 85, "e"),
-                        ("margin", "毛利率", 60, "e"), ("orders", "单数", 40, "center")), height=7)
+                        ("margin", "毛利率", 60, "e"), ("orders", "单数", 40, "center")), height=8)
         self.fin_daily_tree.pack(fill="both", expand=True)
 
         monthly_box = ttk.LabelFrame(body, text="每月营收（近12月）", padding=4)
@@ -2085,20 +2137,52 @@ class CashierApp(tk.Tk):
         self.fin_yearly_tree.pack(fill="both", expand=True)
 
         # 右列
-        warn_box = ttk.LabelFrame(body, text="库存警告", padding=4)
-        warn_box.grid(row=0, column=1, sticky="nsew", padx=(4, 0), pady=(0, 4))
+        # 畅销排行（销量）
+        top_qty_box = ttk.LabelFrame(body, text="畅销排行（销量 TOP10）", padding=4)
+        top_qty_box.grid(row=0, column=1, sticky="nsew", padx=(4, 0), pady=(0, 4))
+        self.fin_top_qty_tree = self._build_tree(
+            top_qty_box, (("name", "商品", 100, "w"), ("category", "类别", 50, "center"),
+                          ("total_qty", "销量", 50, "e"), ("total_revenue", "销售额", 65, "e")), height=5)
+        self.fin_top_qty_tree.pack(fill="both", expand=True)
+
+        # 畅销排行（金额）
+        top_rev_box = ttk.LabelFrame(body, text="畅销排行（销售额 TOP10）", padding=4)
+        top_rev_box.grid(row=1, column=1, sticky="nsew", padx=(4, 0), pady=(0, 4))
+        self.fin_top_rev_tree = self._build_tree(
+            top_rev_box, (("name", "商品", 100, "w"), ("category", "类别", 50, "center"),
+                          ("total_qty", "销量", 50, "e"), ("total_revenue", "销售额", 65, "e")), height=5)
+        self.fin_top_rev_tree.pack(fill="both", expand=True)
+
+        # 入库建议（可调天数）+ 库存警告，并排
+        bottom_frame = ttk.Frame(body)
+        bottom_frame.grid(row=2, column=1, sticky="nsew", padx=(4, 0))
+        bottom_frame.columnconfigure(0, weight=1)
+        bottom_frame.columnconfigure(1, weight=1)
+
+        reorder_box = ttk.LabelFrame(bottom_frame, text="入库建议", padding=4)
+        reorder_box.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
+        reorder_bar = ttk.Frame(reorder_box)
+        reorder_bar.pack(fill="x", pady=(0, 2))
+        ttk.Label(reorder_bar, text="基于近").pack(side="left")
+        self.fin_reorder_days_var = tk.StringVar(value="7")
+        self.fin_reorder_days_combo = ttk.Combobox(reorder_bar, textvariable=self.fin_reorder_days_var,
+                                                    width=4, state="readonly", font=(UI_FONT, 10))
+        self.fin_reorder_days_combo["values"] = ["7", "14", "30", "60", "90"]
+        self.fin_reorder_days_combo.pack(side="left", padx=2)
+        ttk.Label(reorder_bar, text="天销量").pack(side="left")
+        ttk.Button(reorder_bar, text="刷新", command=self._refresh_reorder, width=5).pack(side="right")
+        self.fin_reorder_tree = self._build_tree(
+            reorder_box, (("name", "商品", 80, "w"), ("stock", "库存", 35, "e"),
+                          ("avg", "日均", 35, "e"), ("suggest", "建议入库", 55, "e")), height=5)
+        self.fin_reorder_tree.pack(fill="both", expand=True)
+
+        warn_box = ttk.LabelFrame(bottom_frame, text="库存警告", padding=4)
+        warn_box.grid(row=0, column=1, sticky="nsew", padx=(2, 0))
         self.fin_warn_tree = self._build_tree(
-            warn_box, (("name", "商品", 120, "w"), ("stock", "库存", 45, "e"),
-                       ("low", "预警线", 45, "e")), height=6)
+            warn_box, (("name", "商品", 90, "w"), ("stock", "库存", 35, "e"),
+                       ("low", "预警线", 35, "e")), height=5)
         self.fin_warn_tree.pack(fill="both", expand=True)
         self.fin_warn_tree.tag_configure("low", foreground="red")
-
-        reorder_box = ttk.LabelFrame(body, text="入库建议", padding=4)
-        reorder_box.grid(row=1, column=1, sticky="nsew", padx=(4, 0), pady=(0, 4), rowspan=2)
-        self.fin_reorder_tree = self._build_tree(
-            reorder_box, (("name", "商品", 120, "w"), ("stock", "库存", 45, "e"),
-                          ("avg", "日均", 45, "e"), ("suggest", "建议入库", 65, "e")), height=8)
-        self.fin_reorder_tree.pack(fill="both", expand=True)
 
     def _refresh_finance_tab(self) -> None:
         try:
@@ -2125,11 +2209,34 @@ class CashierApp(tk.Tk):
         self._fill_tree(self.fin_monthly_tree, period_rows(rep["monthly"]))
         self._fill_tree(self.fin_yearly_tree, period_rows(rep["yearly"]))
 
+        # 畅销排行
+        def top_rows(data):
+            return [((d["name"], d.get("category", ""), d["total_qty"],
+                      f"{d['total_revenue']:.2f}"),
+                     str(d["product_id"]), ()) for d in data]
+        self._fill_tree(self.fin_top_qty_tree, top_rows(rep["top_by_qty"]))
+        self._fill_tree(self.fin_top_rev_tree, top_rows(rep["top_by_rev"]))
+
         warn_rows = [((w["name"], w["stock"], w["low_stock"]), str(w["id"]), ("low",))
                      for w in rep["warnings"]]
         self._fill_tree(self.fin_warn_tree, warn_rows)
         self.fin_warn_tree.tag_configure("low", foreground="red")
 
+        reorder_rows = [((r["name"], r["stock"], r["daily_avg"], r["suggest"]),
+                         str(r["id"]), ()) for r in rep["reorder"]]
+        self._fill_tree(self.fin_reorder_tree, reorder_rows)
+
+    def _refresh_reorder(self) -> None:
+        """按自定义天数刷新入库建议。"""
+        try:
+            days = int(self.fin_reorder_days_var.get())
+        except ValueError:
+            days = 7
+        try:
+            rep = self.db.finance_report(reorder_days=days)
+        except Exception:
+            logger.exception("入库建议查询失败")
+            return
         reorder_rows = [((r["name"], r["stock"], r["daily_avg"], r["suggest"]),
                          str(r["id"]), ()) for r in rep["reorder"]]
         self._fill_tree(self.fin_reorder_tree, reorder_rows)

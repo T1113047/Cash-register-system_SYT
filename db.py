@@ -628,6 +628,36 @@ class Database:
                         )
             return sale_id, order_no, change, points
 
+    def get_product_sales_summary(self) -> List[Dict[str, Any]]:
+        """统计所有有销售记录的商品：累计销量、累计销售额。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT si.product_id, p.name, p.category, "
+                "SUM(si.quantity) AS total_qty, "
+                "ROUND(SUM(si.quantity * si.price), 2) AS total_revenue "
+                "FROM sale_items si "
+                "JOIN sales s ON s.id = si.sale_id "
+                "JOIN products p ON p.id = si.product_id "
+                "WHERE s.returned = 0 "
+                "GROUP BY si.product_id "
+                "ORDER BY total_qty DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_product_sale_details(self, product_id: int) -> List[Dict[str, Any]]:
+        """查询某商品的所有销售明细：日期/单号/数量/单价/小计。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT s.id AS sale_id, s.order_no, s.created_at, "
+                "si.quantity, si.price, si.subtotal "
+                "FROM sale_items si "
+                "JOIN sales s ON s.id = si.sale_id "
+                "WHERE si.product_id = ? AND s.returned = 0 "
+                "ORDER BY s.created_at DESC",
+                (product_id,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
     def search_sales(self, keyword: str = "", start: str = "", end: str = "") -> List[Dict[str, Any]]:
         conds = []
         params: List[Any] = []
@@ -784,8 +814,9 @@ class Database:
     # ------------------------------------------------------------------ #
     # 财报分析
     # ------------------------------------------------------------------ #
-    def finance_report(self, daily_days: int = 14) -> Dict[str, Any]:
-        """返回每日/每月/每年营收 + 库存警告 + 入库建议。"""
+    def finance_report(self, daily_days: int = 14, reorder_days: int = 7) -> Dict[str, Any]:
+        """返回每日/每月/每年营收 + 畅销排行 + 库存警告 + 入库建议。
+        reorder_days: 入库建议用于计算日均销量的天数。"""
         today = datetime.date.today()
 
         def _periods(group_expr, where_expr, params):
@@ -869,11 +900,11 @@ class Database:
             ).fetchall()
             warnings = [dict(r) for r in warns]
 
-        # 入库建议（近 7 天日均销量 × 14 天 + 预警线 - 库存）
+        # 入库建议（根据指定天数日均销量 × 区间天数 + 预警线 - 库存）
         with self._connect() as conn:
             reorder_rows = conn.execute(
                 "SELECT p.id, p.barcode, p.name, p.category, p.stock, p.low_stock, "
-                "COALESCE(sold.qty, 0) AS sold_7d "
+                "COALESCE(sold.qty, 0) AS sold_n "
                 "FROM products p "
                 "LEFT JOIN ("
                 "  SELECT product_id, SUM(quantity) AS qty "
@@ -881,14 +912,14 @@ class Database:
                 "    SELECT id FROM sales WHERE date(created_at) >= ?"
                 "  ) GROUP BY product_id"
                 ") sold ON sold.product_id = p.id",
-                [(today - datetime.timedelta(days=7)).strftime("%Y-%m-%d")],
+                [(today - datetime.timedelta(days=reorder_days)).strftime("%Y-%m-%d")],
             ).fetchall()
             reorder = []
             for r in reorder_rows:
                 r = dict(r)
-                daily_avg = math.ceil(r["sold_7d"] / 7) if r["sold_7d"] else 0
+                daily_avg = math.ceil(r["sold_n"] / reorder_days) if r["sold_n"] and reorder_days else 0
                 if daily_avg > 0:
-                    suggest = max(0, daily_avg * 14 + r["low_stock"] - r["stock"])
+                    suggest = max(0, daily_avg * reorder_days + r["low_stock"] - r["stock"])
                 else:
                     suggest = max(0, r["low_stock"] - r["stock"])
                 r["daily_avg"] = daily_avg
@@ -933,7 +964,39 @@ class Database:
             "yearly": yearly_result,
             "warnings": warnings,
             "reorder": reorder,
+            "top_by_qty": self._top_products_sql(since_days=None, limit=10, sort_by="qty"),
+            "top_by_rev": self._top_products_sql(since_days=None, limit=10, sort_by="revenue"),
         }
+
+    @staticmethod
+    def _reorder_since_date(days: int) -> str:
+        """返回 N 天前的日期字符串。"""
+        return (datetime.date.today() - datetime.timedelta(days=days)).strftime("%Y-%m-%d")
+
+    def _top_products_sql(self, since_days: int = None, limit: int = 10,
+                          sort_by: str = "qty") -> List[Dict[str, Any]]:
+        """畅销排行：按销量或销售额排序。since_days=None 表示全部历史。"""
+        where = ""
+        params: list = []
+        if since_days:
+            where = "AND date(s.created_at) >= ?"
+            params.append(self._reorder_since_date(since_days))
+        order = "SUM(si.quantity) DESC" if sort_by == "qty" else "SUM(si.quantity * si.price) DESC"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT si.product_id, p.name, p.category, "
+                f"SUM(si.quantity) AS total_qty, "
+                f"ROUND(SUM(si.quantity * si.price), 2) AS total_revenue "
+                f"FROM sale_items si "
+                f"JOIN sales s ON s.id = si.sale_id "
+                f"JOIN products p ON p.id = si.product_id "
+                f"WHERE s.returned = 0 {where} "
+                f"GROUP BY si.product_id "
+                f"ORDER BY {order} "
+                f"LIMIT ?",
+                params + [limit],
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def finance_range(self, start_date: str, end_date: str) -> Dict[str, Any]:
         """查询自定义日期范围的营收汇总。返回 daily + totals。"""
