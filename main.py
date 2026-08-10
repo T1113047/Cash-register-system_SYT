@@ -1503,13 +1503,14 @@ class CashierApp(tk.Tk):
         left.pack(side="left", fill="both", expand=True, padx=(0, 6))
 
         self.stock_tree = self._build_tree(
-            left, (("id", "ID", 45, "center"), ("name", "名称", 160, "w"),
-                   ("category", "类别", 65, "center"), ("stock", "库存", 55, "e"),
-                   ("low", "预警线", 55, "e"), ("status", "状态", 60, "center")),
+            left, (("id", "ID", 45, "center"), ("name", "名称", 150, "w"),
+                   ("category", "类别", 55, "center"), ("cost", "进价", 55, "e"),
+                   ("stock", "库存", 50, "e"),
+                   ("low", "预警线", 50, "e"), ("status", "状态", 55, "center")),
             height=14)
         self.stock_tree.pack(fill="both", expand=True)
         self.stock_tree.tag_configure("low", foreground="red")
-        self._make_sortable(self.stock_tree, {"id", "stock", "low"}, self._refresh_stock_tab)
+        self._make_sortable(self.stock_tree, {"id", "cost", "stock", "low"}, self._refresh_stock_tab)
         self.stock_tree.bind("<<TreeviewSelect>>", self._on_stock_select)
         self.stock_tree.bind("<Double-1>", lambda _: self._stock_action(1))
 
@@ -1555,12 +1556,22 @@ class CashierApp(tk.Tk):
         ttk.Entry(op, textvariable=self.stock_note_var, width=24).pack(fill="x", pady=(2, 4))
         ttk.Button(op, text="执行操作", command=lambda: self._stock_action(0)).pack(fill="x")
 
+        ttk.Separator(op).pack(fill="x", pady=6)
+        ttk.Label(op, text="价格波动（加权平均进价）", font=("", 9, "bold")).pack(anchor="w")
+        self.price_new_price_var = tk.StringVar(value="")
+        ttk.Label(op, text="新进价:").pack(anchor="w")
+        ttk.Entry(op, textvariable=self.price_new_price_var, width=10).pack(fill="x", pady=(1, 2))
+        self.price_new_qty_var = tk.StringVar(value="")
+        ttk.Label(op, text="新入库数量:").pack(anchor="w")
+        ttk.Entry(op, textvariable=self.price_new_qty_var, width=10).pack(fill="x", pady=(1, 4))
+        ttk.Button(op, text="价格波动计算", command=self._price_fluctuation).pack(fill="x")
+
         log_frame = ttk.LabelFrame(right, text="库存日志", padding=6)
         log_frame.pack(fill="both", expand=True)
         self.stock_log_tree = self._build_tree(
-            log_frame, (("date", "时间", 110, "center"), ("type", "类型", 40, "center"),
+            log_frame, (("date", "时间", 110, "center"), ("type", "类型", 60, "center"),
                         ("qty", "数量", 50, "e"), ("after", "库存", 50, "e"),
-                        ("note", "备注", 150, "w")),
+                        ("cost", "进价", 55, "e"), ("note", "备注", 130, "w")),
             height=10)
         self.stock_log_tree.pack(fill="both", expand=True)
 
@@ -1576,11 +1587,12 @@ class CashierApp(tk.Tk):
             return
         rows = []
         for p in products:
+            cost = p.get("cost_price", 0) or 0
             s = p["stock"]
             l = p["low_stock"]
             status = "⚠ 低库存" if s <= l else "正常"
             tag = ("low",) if s <= l else ()
-            rows.append(((p["id"], p["name"], p.get("category", ""), s, l, status),
+            rows.append(((p["id"], p["name"], p.get("category", ""), f"¥{cost:.2f}", s, l, status),
                          str(p["id"]), tag))
         self._fill_tree(self.stock_tree, rows)
         self.stock_tree.tag_configure("low", foreground="red")
@@ -1644,7 +1656,9 @@ class CashierApp(tk.Tk):
         try:
             logs = self.db.get_stock_logs(pid, 50)
             self._stock_logs_cache = {str(l["id"]): l for l in logs}
-            rows = [((l["created_at"], l["change_type"], l["quantity"], l["stock_after"], l["note"]),
+            rows = [((l["created_at"], l["change_type"], l["quantity"], l["stock_after"],
+                      f"{l['cost_price']:.2f}" if l.get("cost_price") is not None else "—",
+                      self._clean_stock_note(l["note"])),
                      str(l["id"]), ()) for l in logs]
             self._fill_tree(self.stock_log_tree, rows)
         except Exception:
@@ -1663,6 +1677,8 @@ class CashierApp(tk.Tk):
         msg = "确定撤销以下库存变动吗？" + NL + NL
         msg += "商品：" + str(log['product_name']) + NL
         msg += "操作：" + str(log['change_type']) + " " + str(log['quantity']) + " -> 库存 " + str(log['stock_after']) + NL
+        if log.get("cost_price") is not None:
+            msg += "进价：" + str(log["cost_price"]) + NL
         msg += "备注：" + str(log['note']) + NL + NL
         msg += "撤销后将执行反向操作并记录新日志。"
         answer = messagebox.askyesno("确认撤销", msg)
@@ -1672,12 +1688,33 @@ class CashierApp(tk.Tk):
         reverse_note = "撤销日志#" + str(log['id']) + "（原" + str(log['change_type']) + " " + str(log['quantity']) + "，备注：" + str(log['note']) + "）"
         try:
             self.db.adjust_stock(log["product_id"], reverse_qty, reverse_note)
+            # 如果是价格波动入库，还需要回退进价（从日志note中解析旧进价）
+            if log["change_type"] == "价格波动入库":
+                old_cost = self._parse_old_cost_from_note(log.get("note") or "")
+                self.db.set_product_cost_price(log["product_id"], old_cost)
         except DatabaseError as exc:
             messagebox.showerror("撤销失败", str(exc))
             return
         messagebox.showinfo("已撤销", "「" + str(log['product_name']) + "」库存已回退")
         self._refresh_stock_tab()
         self.after(10, lambda: self._refresh_stock_logs(log["product_id"]))
+
+    @staticmethod
+    def _parse_old_cost_from_note(note: str) -> float:
+        """从价格波动日志的note中解析旧进价。格式：旧进价=XX.XX|用户备注"""
+        try:
+            prefix_end = note.index("|")
+            old_cost_str = note[len("旧进价="):prefix_end]
+            return float(old_cost_str)
+        except (ValueError, IndexError):
+            return 0.0
+
+    @staticmethod
+    def _clean_stock_note(note: str) -> str:
+        """在UI和导出中隐藏内部标记前缀。"""
+        if note.startswith("旧进价=") and "|" in note:
+            return note[note.index("|") + 1:]
+        return note
 
     def _stock_action(self, mode: int) -> None:
         sel = self.stock_tree.selection()
@@ -1708,6 +1745,45 @@ class CashierApp(tk.Tk):
         else:
             self.stock_delta_var.set("1")
             self.stock_note_var.set("")
+
+    def _price_fluctuation(self) -> None:
+        """价格波动入库：加权平均计算新进价。"""
+        sel = self.stock_tree.selection()
+        if not sel:
+            messagebox.showwarning("提示", "请先在商品列表中选择一个商品")
+            return
+        try:
+            p = self.db.get_product(int(sel[0]))
+        except Exception:
+            return
+        if p is None:
+            return
+        try:
+            new_price = float(self.price_new_price_var.get().strip())
+            new_qty = int(float(self.price_new_qty_var.get().strip()))
+        except (TypeError, ValueError):
+            messagebox.showerror("输入错误", "新进价和新入库数量必须是有效数字")
+            return
+        if new_price <= 0:
+            messagebox.showerror("输入错误", "新进价必须大于0")
+            return
+        if new_qty <= 0:
+            messagebox.showerror("输入错误", "新入库数量必须大于0")
+            return
+        try:
+            result = self.db.adjust_stock_price(p["id"], new_qty, new_price,
+                                                self.stock_note_var.get().strip() or "价格波动")
+        except DatabaseError as exc:
+            messagebox.showerror("操作失败", str(exc))
+            return
+        msg = (
+            f"「{p['name']}」\n"
+            f"旧进价: ¥{result['old_cost']:.2f}  →  新进价: ¥{result['new_cost']:.2f}\n"
+            f"旧库存: {result['old_stock']}  →  新库存: {result['new_stock']}"
+        )
+        messagebox.showinfo("价格波动完成", msg)
+        self._refresh_stock_tab()
+        self.after(10, lambda: self._refresh_stock_logs(p["id"]))
 
     # ------------------------------------------------------------------ #
     # 销售记录
@@ -2196,6 +2272,30 @@ class CashierApp(tk.Tk):
         ttk.Label(row3, text="重置前自动备份，备份失败不清除数据",
                   foreground="#d33").pack(side="left", padx=(8, 0))
 
+        # ========================
+        # Section 4 — 数据导出
+        # ========================
+        s4 = ttk.LabelFrame(box, text="📤 数据导出", padding=12)
+        s4.pack(fill="x", pady=(8, 0))
+
+        erow1 = ttk.Frame(s4)
+        erow1.pack(fill="x", pady=2)
+        ttk.Label(erow1, text="CSV:", width=6).pack(side="left")
+        ttk.Button(erow1, text="商品", command=self._export_products, width=8).pack(side="left", padx=2)
+        ttk.Button(erow1, text="销售", command=self._export_sales, width=8).pack(side="left", padx=2)
+        ttk.Button(erow1, text="会员", command=self._export_members_csv, width=8).pack(side="left", padx=2)
+        ttk.Button(erow1, text="库存", command=self._export_stock_csv, width=8).pack(side="left", padx=2)
+        ttk.Button(erow1, text="库存日志", command=self._export_stock_logs_csv, width=10).pack(side="left", padx=2)
+
+        erow2 = ttk.Frame(s4)
+        erow2.pack(fill="x", pady=(2, 0))
+        ttk.Label(erow2, text="Excel:", width=6).pack(side="left")
+        ttk.Button(erow2, text="商品", command=self._export_products_excel, width=8).pack(side="left", padx=2)
+        ttk.Button(erow2, text="销售", command=self._export_sales_excel, width=8).pack(side="left", padx=2)
+        ttk.Button(erow2, text="会员", command=self._export_members_excel, width=8).pack(side="left", padx=2)
+        ttk.Button(erow2, text="库存日志", command=self._export_stock_logs_excel, width=10).pack(side="left", padx=2)
+        ttk.Button(erow2, text="一键全部", command=self._export_all_excel, width=10).pack(side="left", padx=(6, 2))
+
         # scrollbar config
         def _resize(_event=None):
             box.update_idletasks()
@@ -2573,6 +2673,32 @@ class CashierApp(tk.Tk):
             messagebox.showerror("导出失败", "详见 cashier.log")
             return
         messagebox.showinfo("成功", f"已导出商品+会员+销售+库存共 {n} 条到\n{path}")
+
+    def _export_stock_logs_csv(self) -> None:
+        path = filedialog.asksaveasfilename(title="导出库存日志 CSV", defaultextension=".csv", initialdir=BACKUP_DIR,
+                                            initialfile="库存日志.csv", filetypes=[("CSV", "*.csv")])
+        if not path:
+            return
+        try:
+            n = self.db.export_stock_logs_csv(path)
+        except Exception:
+            logger.exception("导出库存日志CSV失败")
+            messagebox.showerror("导出失败", "详见 cashier.log")
+            return
+        messagebox.showinfo("成功", f"已导出 {n} 条库存日志")
+
+    def _export_stock_logs_excel(self) -> None:
+        path = filedialog.asksaveasfilename(title="导出库存日志 Excel", defaultextension=".xlsx", initialdir=BACKUP_DIR,
+                                            initialfile="库存日志.xlsx", filetypes=[("Excel", "*.xlsx")])
+        if not path:
+            return
+        try:
+            n = self.db.export_stock_logs_excel(path)
+        except Exception:
+            logger.exception("导出库存日志Excel失败")
+            messagebox.showerror("导出失败", "详见 cashier.log")
+            return
+        messagebox.showinfo("成功", f"已导出 {n} 条库存日志")
 
     def _download_sales_template(self) -> None:
         path = filedialog.asksaveasfilename(title="保存销售导入模板", defaultextension=".xlsx", initialdir=BACKUP_DIR,

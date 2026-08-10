@@ -97,6 +97,11 @@ class Database:
                     DROP TABLE products_old;
                     """
                 )
+            # 迁移：stock_logs 添加 cost_price 列
+            try:
+                conn.execute("ALTER TABLE stock_logs ADD COLUMN cost_price REAL")
+            except sqlite3.OperationalError:
+                pass  # 列已存在
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS sales (
@@ -126,6 +131,7 @@ class Database:
                     change_type  TEXT NOT NULL,
                     quantity     INTEGER NOT NULL,
                     stock_after  INTEGER NOT NULL,
+                    cost_price   REAL,
                     note         TEXT DEFAULT '',
                     created_at   TEXT NOT NULL
                 );
@@ -736,6 +742,32 @@ class Database:
                 (product_id, row["name"], ct, delta, new_stock, note or "", _now()),
             )
 
+    def adjust_stock_price(self, product_id: int, new_qty: int, new_price: float, note: str = "") -> Dict[str, Any]:
+        """价格波动入库：新老库存加权平均计算新进价，写入日志。返回 {old_cost, new_cost, old_stock, new_stock}。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT name, stock, cost_price FROM products WHERE id=?", (product_id,)
+            ).fetchone()
+            if row is None:
+                raise DatabaseError("商品不存在")
+            old_stock = row["stock"]
+            old_cost = row["cost_price"]
+            if new_qty <= 0:
+                raise DatabaseError("入库数量必须大于0")
+            new_stock = old_stock + new_qty
+            new_cost = round((old_stock * old_cost + new_qty * new_price) / new_stock, 2) if new_stock > 0 else new_price
+            conn.execute(
+                "UPDATE products SET stock=?, cost_price=? WHERE id=?",
+                (new_stock, new_cost, product_id),
+            )
+            conn.execute(
+                "INSERT INTO stock_logs (product_id, product_name, change_type, quantity, stock_after, cost_price, note, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (product_id, row["name"], "价格波动入库", new_qty, new_stock, new_cost,
+                 f"旧进价={old_cost:.2f}|{note or ''}", _now()),
+            )
+            return {"old_cost": old_cost, "new_cost": new_cost, "old_stock": old_stock, "new_stock": new_stock}
+
     def get_stock_logs(self, product_id: int, limit: int = 50) -> List[Dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -743,6 +775,11 @@ class Database:
                 (product_id, limit),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def set_product_cost_price(self, product_id: int, cost: float) -> None:
+        """设置商品进价（撤销等场景使用）。"""
+        with self._connect() as conn:
+            conn.execute("UPDATE products SET cost_price=? WHERE id=?", (cost, product_id))
 
     # ------------------------------------------------------------------ #
     # 财报分析
@@ -1094,11 +1131,64 @@ class Database:
         rows = self.search_products()
         with open(path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
-            writer.writerow(["ID", "条码", "名称", "类别", "当前库存", "预警线"])
+            writer.writerow(["ID", "条码", "名称", "类别", "进价", "当前库存", "预警线"])
             for r in rows:
                 writer.writerow([r["id"], r["barcode"], r["name"], r["category"],
-                                 r["stock"], r["low_stock"]])
+                                 r.get("cost_price") or 0, r["stock"], r["low_stock"]])
         return len(rows)
+
+    @staticmethod
+    def _clean_note(note: str) -> str:
+        """去除价格波动内部标记前缀。"""
+        if note and note.startswith("旧进价=") and "|" in note:
+            return note[note.index("|") + 1:]
+        return note or ""
+
+    def export_stock_logs_csv(self, path: str) -> int:
+        """导出全部库存日志为 CSV。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT sl.*, p.barcode FROM stock_logs sl LEFT JOIN products p ON sl.product_id=p.id "
+                "ORDER BY sl.id DESC"
+            ).fetchall()
+        with open(path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.writer(f)
+            writer.writerow(["ID", "商品ID", "条码", "商品名", "操作类型", "数量", "库存后", "进价", "备注", "时间"])
+            for r in rows:
+                cost_str = f"{r['cost_price']:.2f}" if r["cost_price"] is not None else ""
+                writer.writerow([r["id"], r["product_id"], r["barcode"] or "", r["product_name"],
+                                 r["change_type"], r["quantity"], r["stock_after"],
+                                 cost_str, self._clean_note(r["note"]), r["created_at"]])
+        return len(rows)
+
+    def export_stock_logs_excel(self, path: str) -> int:
+        """导出全部库存日志为 Excel。"""
+        from openpyxl import Workbook
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT sl.*, p.barcode FROM stock_logs sl LEFT JOIN products p ON sl.product_id=p.id "
+                "ORDER BY sl.id DESC"
+            ).fetchall()
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "库存日志"
+        ws.append(["ID", "商品ID", "条码", "商品名", "操作类型", "数量", "库存后", "进价", "备注", "时间"])
+        for r in rows:
+            ws.append([r["id"], r["product_id"], r["barcode"] or "", r["product_name"],
+                       r["change_type"], r["quantity"], r["stock_after"],
+                       r["cost_price"], self._clean_note(r["note"]), r["created_at"]])
+        self._style_sheet(ws, [])
+        wb.save(path)
+        return len(rows)
+
+    def get_all_stock_logs(self) -> List[Dict[str, Any]]:
+        """获取全部库存日志（含条码）。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT sl.*, p.barcode FROM stock_logs sl LEFT JOIN products p ON sl.product_id=p.id "
+                "ORDER BY sl.id DESC"
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     # --- 一键导出全部 ---
     def export_all_excel(self, path: str) -> int:
@@ -1135,14 +1225,28 @@ class Database:
         self._style_sheet(ws3, [5, 6, 7, 8])
 
         ws4 = wb.create_sheet("库存快照")
-        ws4.append(["ID", "条码", "名称", "类别", "当前库存", "预警线"])
+        ws4.append(["ID", "条码", "名称", "类别", "进价", "当前库存", "预警线"])
         for r in self.search_products():
             ws4.append([r["id"], r["barcode"], r["name"], r["category"],
-                        r["stock"], r["low_stock"]])
-        self._style_sheet(ws4, [5])
+                        r.get("cost_price") or 0, r["stock"], r["low_stock"]])
+        self._style_sheet(ws4, [4, 5])
+
+        ws5 = wb.create_sheet("库存日志")
+        ws5.append(["ID", "商品ID", "条码", "商品名", "操作类型", "数量", "库存后", "进价", "备注", "时间"])
+        with self._connect() as conn:
+            log_rows = conn.execute(
+                "SELECT sl.*, p.barcode FROM stock_logs sl LEFT JOIN products p ON sl.product_id=p.id "
+                "ORDER BY sl.id DESC"
+            ).fetchall()
+        for r in log_rows:
+            ws5.append([r["id"], r["product_id"], r["barcode"] or "", r["product_name"],
+                        r["change_type"], r["quantity"], r["stock_after"],
+                        r["cost_price"], self._clean_note(r["note"]), r["created_at"]])
+        self._style_sheet(ws5, [])
 
         wb.save(path)
-        return len(self.search_products()) + len(self.search_members()) + len(self.search_sales())
+        total = len(self.search_products()) + len(self.search_members()) + len(self.search_sales()) + len(log_rows)
+        return total
 
     # --- 销售导入模板 ---
     def write_sales_template(self, path: str) -> None:
@@ -1329,6 +1433,8 @@ class Database:
         self.export_products_excel(products_xlsx)
         self.export_sales_excel(sales_xlsx)
         self.export_members_excel(members_xlsx)
+        stock_logs_xlsx = os.path.join(day_dir, "库存日志.xlsx")
+        self.export_stock_logs_excel(stock_logs_xlsx)
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         cnt = 1
@@ -1346,6 +1452,7 @@ class Database:
                 zf.write(products_xlsx, "商品.xlsx")
                 zf.write(sales_xlsx, "销售.xlsx")
                 zf.write(members_xlsx, "会员.xlsx")
+                zf.write(stock_logs_xlsx, "库存日志.xlsx")
         finally:
             try:
                 os.remove(db_snapshot)
