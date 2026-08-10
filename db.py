@@ -1468,7 +1468,9 @@ class Database:
             with self._connect() as conn:
                 exist = None
                 if barcode:
-                    exist = conn.execute("SELECT id FROM products WHERE barcode=?", (barcode,)).fetchone()
+                    exist = conn.execute(
+                        "SELECT id, name FROM products WHERE barcode=? AND name=?", (barcode, name)
+                    ).fetchone()
                 if exist:
                     conn.execute(
                         "UPDATE products SET name=?, category=?, cost_price=?, sell_price=?, "
