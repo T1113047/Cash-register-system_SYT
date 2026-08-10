@@ -58,7 +58,7 @@ class Database:
                 """
                 CREATE TABLE IF NOT EXISTS products (
                     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                    barcode      TEXT UNIQUE,
+                    barcode      TEXT,
                     name         TEXT NOT NULL,
                     category     TEXT DEFAULT '其他',
                     cost_price   REAL NOT NULL DEFAULT 0,
@@ -68,6 +68,37 @@ class Database:
                     low_stock    INTEGER NOT NULL DEFAULT 10,
                     created_at   TEXT NOT NULL
                 );
+                """
+            )
+            # 迁移：去掉 barcode UNIQUE 约束，允许同名条码存不同商品
+            try:
+                ddl = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='products'").fetchone()
+                need_migrate = ddl and 'barcode TEXT UNIQUE' in (ddl[0] or '')
+            except Exception:
+                need_migrate = False
+            if need_migrate:
+                logger.info("迁移: 移除 products.barcode UNIQUE 约束")
+                conn.executescript(
+                    """
+                    ALTER TABLE products RENAME TO products_old;
+                    CREATE TABLE products (
+                        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                        barcode      TEXT,
+                        name         TEXT NOT NULL,
+                        category     TEXT DEFAULT '其他',
+                        cost_price   REAL NOT NULL DEFAULT 0,
+                        sell_price   REAL NOT NULL DEFAULT 0,
+                        member_price REAL,
+                        stock        INTEGER NOT NULL DEFAULT 0,
+                        low_stock    INTEGER NOT NULL DEFAULT 10,
+                        created_at   TEXT NOT NULL
+                    );
+                    INSERT INTO products SELECT * FROM products_old;
+                    DROP TABLE products_old;
+                    """
+                )
+            conn.executescript(
+                """
                 CREATE TABLE IF NOT EXISTS sales (
                     id            INTEGER PRIMARY KEY AUTOINCREMENT,
                     total_amount  REAL NOT NULL DEFAULT 0,
@@ -442,10 +473,12 @@ class Database:
                 (member_id, _now(), order_no),
             )
 
-    def get_product_by_barcode(self, barcode: str) -> Optional[Dict[str, Any]]:
+    def get_products_by_barcode(self, barcode: str) -> List[Dict[str, Any]]:
         with self._connect() as conn:
-            row = conn.execute("SELECT * FROM products WHERE barcode=?", (barcode.strip(),)).fetchone()
-            return dict(row) if row else None
+            rows = conn.execute(
+                "SELECT * FROM products WHERE barcode=?", (barcode.strip(),)
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     # ------------------------------------------------------------------ #
     # 会员
@@ -1451,25 +1484,36 @@ class Database:
                 skipped += 1
                 continue
             barcode = str(row.get("barcode") or "").strip() or None
+            category = str(row.get("category") or "其他").strip() or "其他"
+
+            def _safe_float(key: str, default: float = 0.0) -> float:
+                try:
+                    return float(row.get(key) or default)
+                except (TypeError, ValueError):
+                    return default
+
+            def _safe_int(key: str, default: int = 0) -> int:
+                try:
+                    return int(float(row.get(key) or default))
+                except (TypeError, ValueError):
+                    return default
+
+            cost = _safe_float("cost_price")
+            sell = _safe_float("sell_price")
+            mp_raw = row.get("member_price")
             try:
-                category = str(row.get("category") or "其他").strip() or "其他"
-                cost = float(row.get("cost_price") or 0)
-                sell = float(row.get("sell_price") or 0)
-                mp_raw = row.get("member_price")
                 mp = float(mp_raw) if str(mp_raw or "").strip() else None
-                stock = int(float(row.get("stock") or 0))
-                low = int(float(row.get("low_stock") or 10))
-                if cost < 0 or sell < 0 or stock < 0 or low < 0:
-                    skipped += 1
-                    continue
             except (TypeError, ValueError):
-                skipped += 1
-                continue
+                mp = None
+            stock = _safe_int("stock")
+            low = _safe_int("low_stock", 10)
+
             with self._connect() as conn:
                 exist = None
                 if barcode:
                     exist = conn.execute(
-                        "SELECT id, name FROM products WHERE barcode=? AND name=?", (barcode, name)
+                        "SELECT id, name FROM products WHERE barcode=? AND name=?",
+                        (barcode, name),
                     ).fetchone()
                 if exist:
                     conn.execute(
@@ -1480,7 +1524,8 @@ class Database:
                     updated += 1
                 else:
                     conn.execute(
-                        "INSERT INTO products (barcode, name, category, cost_price, sell_price, member_price, stock, low_stock, created_at) "
+                        "INSERT INTO products (barcode, name, category, cost_price, sell_price, "
+                        "member_price, stock, low_stock, created_at) "
                         "VALUES (?,?,?,?,?,?,?,?,?)",
                         (barcode, name, category, cost, sell, mp, stock, low, _now()),
                     )

@@ -1606,11 +1606,16 @@ class CashierApp(tk.Tk):
 
     def _stock_barcode_lookup(self, code: str) -> None:
         try:
-            p = self.db.get_product_by_barcode(code)
+            products = self.db.get_products_by_barcode(code)
         except Exception:
             return
-        if p is not None:
-            self._stock_select_and_refresh(p)
+        if products:
+            if len(products) == 1:
+                self._stock_select_and_refresh(products[0])
+            else:
+                self._show_barcode_search_popup(
+                    code, [(1.0, p) for p in products],
+                    self._stock_select_and_refresh)
             self.stock_barcode_var.set("")
             return
         # 精确匹配失败 → 模糊搜索
@@ -2310,10 +2315,16 @@ class CashierApp(tk.Tk):
         index = self.notebook.index(self.notebook.select())
         if index == 0:
             try:
-                p = self.db.get_product_by_barcode(code)
-                if p:
-                    self._add_to_cart(p)
-                    self._set_status(f"扫码: {p['name']}", "green")
+                products = self.db.get_products_by_barcode(code)
+                if products:
+                    if len(products) == 1:
+                        self._add_to_cart(products[0])
+                        self._set_status(f"扫码: {products[0]['name']}", "green")
+                    else:
+                        self._show_barcode_search_popup(
+                            code, [(1.0, p) for p in products],
+                            lambda p: (self._add_to_cart(p), self._set_status(f"扫码: {p['name']}", "green"))
+                        )
                     self.cashier_search_var.set("")
                 else:
                     results = self._fuzzy_barcode_search(code)
@@ -2331,9 +2342,14 @@ class CashierApp(tk.Tk):
                 pass
         elif index == 3:
             try:
-                p = self.db.get_product_by_barcode(code)
-                if p:
-                    self._stock_select_and_refresh(p)
+                products = self.db.get_products_by_barcode(code)
+                if products:
+                    if len(products) == 1:
+                        self._stock_select_and_refresh(products[0])
+                    else:
+                        self._show_barcode_search_popup(
+                            code, [(1.0, p) for p in products],
+                            self._stock_select_and_refresh)
                 else:
                     results = self._fuzzy_barcode_search(code)
                     if len(results) == 1 and results[0][0] >= 0.9:
@@ -2641,6 +2657,7 @@ class CashierApp(tk.Tk):
         try:
             result = self.db.import_products(rows)
         except Exception:
+            logger.exception("商品导入失败")
             messagebox.showerror("导入失败", "详见 cashier.log")
             return
         messagebox.showinfo("导入完成", f"新增 {result['inserted']} 条，更新 {result['updated']} 条，跳过 {result['skipped']} 条")
